@@ -17,7 +17,7 @@ services:
     container_name: jamajoint_nginx
     restart: unless-stopped
     ports:
-      - "80:80"
+      - "8080:80"
     volumes:
       - ./:/var/www/jamajoint
       - ./docker/nginx/jamajoint.conf:/etc/nginx/conf.d/default.conf:ro
