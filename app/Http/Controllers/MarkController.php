@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\{Exam, School, Mark, Stream, Paper};
+use App\Jobs\ProcessExamChangesJob;
 use Illuminate\Http\Request;
 
 class MarkController extends Controller
@@ -36,18 +37,14 @@ class MarkController extends Controller
     {
         $user = auth()->user();
 
-        // 1. Security check: Teacher can only access their own school
         if ($user->role === 'teacher' && $user->school_id !== (int)$school->id) {
             abort(403, 'Unauthorized access to this school.');
         }
 
-        // 2. Operational check: If admin hasn't opened submission to teachers, 
-        // prevent direct access via URL guessing.
         if ($user->role === 'teacher' && $exam->mark_submission_mode !== 'teachers') {
             return redirect()->route('dashboard')->with('error', 'Mark submission for this exam is currently closed to teachers.');
         }
 
-        // 3. Load necessary data for the view
         $exam->load(['subject', 'form', 'papers']);
 
         $streams = $school->streams()
@@ -153,7 +150,10 @@ class MarkController extends Controller
             }
         }
 
-        // Redirect to the overview page instead of back to the form
+        if ($exam->status === 'finalized') {
+            ProcessExamChangesJob::dispatch($exam);
+        }
+
         return redirect()->route('exams.school.view-submissions', [
             'exam' => $exam->id,
             'examSlug' => $exam->slug,
@@ -168,10 +168,20 @@ class MarkController extends Controller
             'score' => 'required|numeric|min:0|max:100',
         ]);
 
+        $oldScore = $mark->score;
+        $newScore = $request->score;
+
         $mark->update([
-            'score' => $request->score,
+            'score' => $newScore,
             'user_id' => auth()->id(),
         ]);
+
+        if ($oldScore != $newScore) {
+            $examModel = Exam::find($mark->exam_id);
+            if ($examModel && $examModel->status === 'finalized') {
+                ProcessExamChangesJob::dispatch($examModel);
+            }
+        }
 
         return response()->json([
             'success' => true,
@@ -182,7 +192,13 @@ class MarkController extends Controller
 
     public function deleteMark($school, $school_slug, $stream, $paper, Mark $mark)
     {
+        $examId = $mark->exam_id;
         $mark->delete();
+
+        $examModel = Exam::find($examId);
+        if ($examModel && $examModel->status === 'finalized') {
+            ProcessExamChangesJob::dispatch($examModel);
+        }
 
         return response()->json([
             'success' => true,
@@ -192,14 +208,16 @@ class MarkController extends Controller
 
     public function deleteAllMarks(Exam $exam, $examSlug, School $school, $schoolSlug, Stream $stream, Paper $paper)
     {
-        // Perform the mass deletion
         Mark::where('exam_id', $exam->id)
             ->where('school_id', $school->id)
             ->where('stream_id', $stream->id)
             ->where('paper_id', $paper->id)
             ->delete();
 
-        // Redirect to the school's submission overview page
+        if ($exam->status === 'finalized') {
+            ProcessExamChangesJob::dispatch($exam);
+        }
+
         return redirect()->route('exams.school.view-submissions', [
             'exam'       => $exam->id,
             'examSlug'   => $exam->slug,

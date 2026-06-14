@@ -5,8 +5,10 @@ namespace App\Http\Controllers;
 use App\Models\{Exam, Subject, Form, GradingSystem, AcademicYear, Term};
 use App\Models\Mark;
 use App\Models\School;
+use App\Jobs\ProcessExamChangesJob;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
+use Illuminate\Support\Facades\DB;
 
 class ExamController extends Controller
 {
@@ -23,8 +25,6 @@ class ExamController extends Controller
 
     public function store(Request $request)
     {
-
-
         $activeYear = AcademicYear::where('is_active', 1)->firstOrFail();
         $activeTerm = Term::where('is_active', 1)->firstOrFail();
 
@@ -67,7 +67,28 @@ class ExamController extends Controller
     public function show(Request $request, Exam $exam)
     {
         $user = auth()->user();
-        $exam->load(['subject.papers', 'form']);
+        $exam->load(['subject.papers', 'form', 'configurations.paper']);
+
+        if ($exam->status === 'finalized') {
+            $canViewResults = false;
+
+            if ($user->can('manage-exams')) {
+                $canViewResults = true;
+            } elseif ($user->role === 'teacher' && $exam->visibility === 'public') {
+                $canViewResults = true;
+            } elseif ($user->role === 'teacher' && $user->school_id) {
+                $canViewResults = true;
+            }
+
+            if ($canViewResults) {
+                return redirect()->route('results.index', [
+                    'exam' => $exam->id,
+                    'slug' => $exam->slug
+                ]);
+            }
+
+            abort(403, 'Results are not yet available for public viewing.');
+        }
 
         if ($user->can('manage-exams')) {
             $schools = $exam->schools()
@@ -77,7 +98,7 @@ class ExamController extends Controller
 
             $submissionCounts = Mark::where('exam_id', $exam->id)
                 ->whereNotNull('score')
-                ->select('school_id', 'paper_id', \DB::raw('count(*) as count'))
+                ->select('school_id', 'paper_id', DB::raw('count(*) as count'))
                 ->groupBy('school_id', 'paper_id')
                 ->get()
                 ->groupBy('school_id');
@@ -91,11 +112,7 @@ class ExamController extends Controller
             $examAdmins = $exam->examAdmins()->with('user')->get();
 
             return view('dashboard.exams.show', compact(
-                'exam',
-                'schools',
-                'allSchools',
-                'examAdmins',
-                'registeredCount'
+                'exam', 'schools', 'allSchools', 'examAdmins', 'registeredCount'
             ));
         }
 
@@ -106,27 +123,26 @@ class ExamController extends Controller
                 ->where('school_id', $user->school_id)
                 ->whereNotNull('score')
                 ->exists();
-                
+
             if ($hasMarks) {
                 return redirect()->route('exams.school.view-submissions', [
-                    'exam' => $exam->id,
-                    'examSlug' => $exam->slug, // Ensure this key matches the route's {examSlug}
-                    'school' => $school->id,
-                    'schoolSlug' => $school->slug
+                    'exam' => $exam->id, 'examSlug' => $exam->slug,
+                    'school' => $school->id, 'schoolSlug' => $school->slug
                 ]);
             }
 
             return redirect()->route('marks.submit-streams', [
-                'exam' => $exam->id,
-                'examSlug' => $exam->slug,
-                'school' => $school->id,
-                'schoolSlug' => $school->slug
+                'exam' => $exam->id, 'examSlug' => $exam->slug,
+                'school' => $school->id, 'schoolSlug' => $school->slug
             ]);
         }
 
         $school = School::with(['streams' => function ($q) use ($exam) {
             $q->where('form_id', $exam->form_id);
         }])->find($user->school_id);
+
+        $totalStudents = 0;
+        $totalSubmitted = 0;
 
         if ($school) {
             $school->streams->each(function ($stream) use ($exam) {
@@ -139,14 +155,10 @@ class ExamController extends Controller
 
             $totalStudents = $school->streams->sum('students_count');
             $totalSubmitted = $school->streams->sum('submitted_count');
-        } else {
-            $totalStudents = 0;
-            $totalSubmitted = 0;
         }
 
         return view('dashboard.exams.teacher-show', compact('exam', 'school', 'totalStudents', 'totalSubmitted'));
     }
-
 
     private function getFormData()
     {
@@ -166,5 +178,37 @@ class ExamController extends Controller
             'grading_system_id' => 'required|exists:grading_systems,id',
             'mark_submission_mode' => 'required|in:teachers,admins',
         ];
+    }
+
+    public function changeExamStatus(Exam $exam, $slug)
+    {
+        if ($exam->slug !== $slug) return redirect()->route('exams.show', ['exam' => $exam->id, 'slug' => $exam->slug]);
+
+        $exam->status = ($exam->status === 'finalized') ? 'processing' : 'finalized';
+        $message = ($exam->status === 'finalized') ? 'Exam published and finalized.' : 'Exam unpublished.';
+        
+        $exam->save();
+
+        ProcessExamChangesJob::dispatch($exam);
+
+        return redirect()->route('exams.show', ['exam' => $exam->id, 'slug' => $exam->slug])->with('success', $message);
+    }
+
+    public function changeVisibility(Exam $exam, $slug)
+    {
+        if ($exam->slug !== $slug) return redirect()->route('exams.show', ['exam' => $exam->id, 'slug' => $exam->slug]);
+
+        if ($exam->status !== 'finalized') {
+            return redirect()->route('exams.show', ['exam' => $exam->id, 'slug' => $exam->slug])->with('error', 'Only finalized exams can be toggled.');
+        }
+
+        $exam->visibility = ($exam->visibility === 'private') ? 'public' : 'private';
+        $message = 'Visibility updated to ' . $exam->visibility;
+        
+        $exam->save();
+
+        ProcessExamChangesJob::dispatch($exam);
+
+        return redirect()->route('exams.show', ['exam' => $exam->id, 'slug' => $exam->slug])->with('success', $message);
     }
 }

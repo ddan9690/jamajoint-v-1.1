@@ -4,46 +4,76 @@ namespace App\Http\Controllers;
 
 use App\Models\Exam;
 use App\Models\ExamConfiguration;
+use App\Models\Paper;
+use App\Jobs\ProcessExamChangesJob; // Import the centralized job
 use Illuminate\Http\Request;
 
 class ExamConfigurationController extends Controller
 {
-    public function index($id, $slug)
+    /**
+     * Store or update an exam configuration for a paper (inline editing).
+     */
+    public function store(Request $request, Exam $exam, $slug)
     {
-        $exam = Exam::with('subject.papers')->where('id', $id)->where('slug', $slug)->firstOrFail();
-        
-        $configs = ExamConfiguration::where('exam_id', $exam->id)->get()->keyBy('paper_id');
-
-        return view('dashboard.exams.configure', compact('exam', 'configs'));
-    }
-
-    public function store(Request $request, $id, $slug)
-    {
-        // 1. Verify the exam exists
-        $exam = Exam::where('id', $id)->where('slug', $slug)->firstOrFail();
-
-        // 2. Validate the input
-        $request->validate([
-            'configurations' => 'required|array',
-            'configurations.*.max_score' => 'required|numeric|min:0',
-            'configurations.*.weight' => 'required|numeric|min:0',
-        ]);
-
-        // 3. Process each configuration
-        foreach ($request->configurations as $paperId => $data) {
-            ExamConfiguration::updateOrCreate(
-                [
-                    'exam_id' => $exam->id, 
-                    'paper_id' => $paperId
-                ],
-                [
-                    'max_score' => $data['max_score'], 
-                    'weight' => $data['weight']
-                ]
-            );
+        // Redirect if slug doesn't match
+        if ($exam->slug !== $slug) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Invalid exam slug'
+            ], 404);
         }
 
-        // 4. Redirect back with feedback
-        return back()->with('success', 'Exam configuration saved successfully.');
+        // Validate request
+        $request->validate([
+            'paper_id' => 'required|exists:papers,id',
+            'max_score' => 'required|integer|min:1|max:1000',
+            'weight' => 'required|numeric|min:0|max:100'
+        ]);
+
+        // Verify that the paper belongs to the exam's subject
+        $paper = Paper::find($request->paper_id);
+        if (!$paper || $paper->subject_id !== $exam->subject_id) {
+            return response()->json([
+                'success' => false,
+                'message' => 'This paper does not belong to the exam\'s subject'
+            ], 422);
+        }
+
+        try {
+            // Update or create configuration
+            $config = ExamConfiguration::updateOrCreate(
+                [
+                    'exam_id' => $exam->id,
+                    'paper_id' => $request->paper_id,
+                ],
+                [
+                    'max_score' => $request->max_score,
+                    'weight' => $request->weight,
+                ]
+            );
+
+            // Trigger the background job to refresh result snapshots
+            // We only trigger this if the exam is already finalized
+            if ($exam->status === 'finalized') {
+                ProcessExamChangesJob::dispatch($exam);
+            }
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Configuration saved successfully',
+                'data' => [
+                    'id' => $config->id,
+                    'paper_id' => $config->paper_id,
+                    'max_score' => $config->max_score,
+                    'weight' => (float) $config->weight,
+                ]
+            ]);
+
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to save configuration: ' . $e->getMessage()
+            ], 500);
+        }
     }
 }

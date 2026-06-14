@@ -1,22 +1,10 @@
 <?php
 
-use App\Http\Controllers\{
-    DashboardController,
-    SchoolController,
-    StreamController,
-    StudentController,
-    SubjectController,
-    PaperController,
-    GradingController,
-    GradingSystemController,
-    UserController,
-    ExamController,
-    ExamSchoolController,
-    ExamConfigurationController,
-    ExamAdminController,
-    MarkController
-};
+use App\Http\Controllers\{DashboardController, SchoolController, StreamController, StudentController, SubjectController, PaperController, GradingController, GradingSystemController, UserController, ExamController, ExamSchoolController, ExamConfigurationController, ExamAdminController, MarkController, ResultController};
 use App\Http\Controllers\Auth\{LoginController, RegisterController};
+use App\Http\Controllers\MarksheetController;
+use App\Http\Controllers\Results\SchoolRankingController;
+use App\Http\Controllers\ResultsController;
 use Illuminate\Support\Facades\Route;
 
 Route::get('/', fn() => auth()->check() ? redirect('/dashboard') : redirect('/login'));
@@ -44,7 +32,9 @@ Route::middleware('auth')->group(function () {
         Route::post('/school/{school}/{schoolSlug}/stream/{stream}/paper/{paper}/marks/update/{mark}', [MarkController::class, 'updateMark'])->name('marks.update');
         Route::post('/school/{school}/{schoolSlug}/stream/{stream}/paper/{paper}/marks/delete/{mark}', [MarkController::class, 'deleteMark'])->name('marks.delete');
         Route::delete('/school/{school}/{schoolSlug}/stream/{stream}/paper/{paper}/delete-stream-marks', [MarkController::class, 'deleteAllMarks'])
-    ->name('marks.delete-all');
+            ->name('marks.delete-all');
+
+        Route::get('/school/{school}/{schoolSlug}/download-marksheet', [MarksheetController::class, 'download'])->name('exams.school.download-marksheet');
     });
 
     /* Users Management */
@@ -122,8 +112,8 @@ Route::middleware('auth')->group(function () {
             Route::get('/{exam}/{slug}/edit', [ExamController::class, 'edit'])->name('edit');
             Route::put('/{exam}/{slug}', [ExamController::class, 'update'])->name('update');
             Route::delete('/{exam}/{slug}', [ExamController::class, 'destroy'])->name('destroy');
-            Route::patch('/{exam}/{slug}/toggle-status', [ExamController::class, 'toggleStatus'])->name('toggle-status');
-
+            Route::patch('/{exam}/{slug}/change-status', [ExamController::class, 'changeExamStatus'])->name('change-status');
+            Route::patch('/{exam}/{slug}/change-visibility', [ExamController::class, 'changeVisibility'])->name('change-visibility');
             Route::post('/{exam}/register-schools-bulk', [ExamSchoolController::class, 'storeBulk'])->name('register-schools-bulk');
             Route::delete('/{exam}/remove-school/{school}', [ExamSchoolController::class, 'destroy'])->name('remove-school');
             Route::get('/{exam}/{slug}/configure', [ExamConfigurationController::class, 'index'])->name('configurations.index');
@@ -135,5 +125,11 @@ Route::middleware('auth')->group(function () {
         Route::middleware(['can:view,exam'])->group(function () {
             Route::get('/{exam}/{slug}', [ExamController::class, 'show'])->name('show');
         });
+    });
+
+
+    Route::prefix('exams/{exam}/{slug}/results')->name('results.')->middleware('auth')->group(function () {
+        Route::get('/', [ResultsController::class, 'index'])->name('index');
+        Route::get('/school-ranking', [SchoolRankingController::class, 'index'])->name('school-ranking');
     });
 });
